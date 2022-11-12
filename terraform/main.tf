@@ -217,7 +217,7 @@ module "vm" {
   location         = azurerm_resource_group.rg.location
   name             = each.value
   subnet_id        = azurerm_subnet.subnet.id
-  enable_public_ip = true
+  enable_public_ip = false
   custom_data      = replace(local.custom_data, "#CONNECTION_STRING_HERE", shell_script.register_iot_edge_device[each.value].output.connectionString)
 }
 
@@ -245,9 +245,16 @@ resource "null_resource" "start_stream_analytics_job" {
   ]
   triggers = {
     create_trigger = random_string.random_suffix.id
+    rg_name = azurerm_resource_group.rg.name
+    stream_analytics_job_name = azurerm_stream_analytics_job.stream_analytics_job.name
   }
   provisioner "local-exec" {
-    command = "az stream-analytics job start --job-name ${azurerm_stream_analytics_job.stream_analytics_job.name} --resource-group ${azurerm_resource_group.rg.name}"
+    command = "az stream-analytics job start --job-name ${self.triggers.stream_analytics_job_name} --resource-group ${self.triggers.rg_name}"
     when = create
+  }
+
+  provisioner "local-exec" {
+    command = "az stream-analytics job stop --job-name ${self.triggers.stream_analytics_job_name} --resource-group ${self.triggers.rg_name}"
+    when = destroy
   }
 }

@@ -4,7 +4,18 @@ set -e
 
 create() {
     az iot hub device-identity create --device-id "$iot_edge_device_name" --edge-enabled --hub-name "$iot_hub_name" --output none
-    az iot edge set-modules --device-id "$iot_edge_device_name" --hub-name "$iot_hub_name" --content "$iot_module_settings_filepath"
+    for i in {1..10}
+    do
+      set +e
+      az iot edge set-modules --device-id "$iot_edge_device_name" --hub-name "$iot_hub_name" --content "$iot_module_settings_filepath"
+      if [ $? -eq 0 ]
+      then
+        exit 0
+      else
+        sleep 10
+      fi
+      set -e
+    done
     # shellcheck disable=SC2162
     read
 }

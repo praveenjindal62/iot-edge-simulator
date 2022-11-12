@@ -48,7 +48,7 @@ resource "azurerm_public_ip" "pip" {
 }
 
 resource "azurerm_virtual_machine_extension" "custom_script" {
-  count = var.custom_data == null ? 0 : 1
+  #count = var.custom_data == null ? 0 : 1
   name                 = "custom_script"
   virtual_machine_id   = azurerm_linux_virtual_machine.main.id
   publisher            = "Microsoft.Azure.Extensions"

@@ -8,14 +8,14 @@ terraform {
   }
 }
 
-provider "azurerm"{
-    features{}
+provider "azurerm" {
+  features {}
 }
 
 
 variable "number_of_edge_devices" {
-    type = number
-    default = 1
+  type    = number
+  default = 3
 }
 
 resource "azurerm_resource_group" "rg" {
@@ -41,13 +41,39 @@ resource "azurerm_iothub" "iothub" {
   }
 }
 
+resource "azurerm_storage_account" "storageaccount" {
+  name                     = "storageacc${random_string.random_suffix.result}"
+  resource_group_name      = azurerm_resource_group.rg.name
+  location                 = azurerm_resource_group.rg.location
+  account_tier             = "Standard"
+  account_replication_type = "GRS"
+}
+
+resource "azurerm_storage_table" "storage_table" {
+  name                 = "IOTDATA"
+  storage_account_name = azurerm_storage_account.storageaccount.name
+}
+
+resource "azurerm_storage_table_entity" "entity" {
+  storage_account_name = azurerm_storage_account.storageaccount.name
+  table_name           = azurerm_storage_table.storage_table.name
+
+  partition_key = "PartitionKey"
+  row_key       = "RowKey"
+
+  entity = {
+
+  }
+}
+
+
 
 resource "azurerm_stream_analytics_job" "stream_analytics_job" {
-  name                                     = "stream-analytics-job-${random_string.random_suffix.result}"
-  resource_group_name                      = azurerm_resource_group.rg.name
-  location                                 = azurerm_resource_group.rg.location
-  output_error_policy                      = "Drop"
-  streaming_units                          = 3
+  name                = "stream-analytics-job-${random_string.random_suffix.result}"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  output_error_policy = "Drop"
+  streaming_units     = 3
 
   transformation_query = <<QUERY
 WITH machineEvent AS (
@@ -74,13 +100,13 @@ SELECT
 FROM [iot-hub-input-01] AS event
 CROSS APPLY GetRecordProperties(event.IotHub) AS device
 )
-SELECT me1.timeCreated,
-       me1.PropertyValue AS MachineTemperature,
+SELECT me1.PropertyValue AS MachineTemperature,
        me2.PropertyValue AS MachinePressure,
        ae1.PropertyValue AS AmbientTemperaturem,
        ae2.PropertyValue AS AmbientHumidity,
-       device.PropertyValue AS DeviceID
-INTO [powerbi-output-01]
+       device.PropertyValue AS ${azurerm_storage_table_entity.entity.partition_key},
+       me1.timeCreated AS ${azurerm_storage_table_entity.entity.row_key}
+INTO [output-01]
 FROM machineEvent AS me1
 JOIN machineEvent AS me2
 ON me1.timeCreated = me2.timeCreated 
@@ -119,6 +145,17 @@ resource "azurerm_stream_analytics_stream_input_iothub" "stream_analytics_job_in
   }
 }
 
+resource "azurerm_stream_analytics_output_table" "stream_analytics_job_output" {
+  name                      = "output-01"
+  stream_analytics_job_name = azurerm_stream_analytics_job.stream_analytics_job.name
+  resource_group_name       = azurerm_stream_analytics_job.stream_analytics_job.resource_group_name
+  storage_account_name      = azurerm_storage_account.storageaccount.name
+  storage_account_key       = azurerm_storage_account.storageaccount.primary_access_key
+  table                     = azurerm_storage_table.storage_table.name
+  partition_key             = azurerm_storage_table_entity.entity.partition_key
+  row_key                   = azurerm_storage_table_entity.entity.row_key
+  batch_size                = 5
+}
 
 resource "shell_script" "register_iot_edge_device" {
   lifecycle_commands {
@@ -126,12 +163,12 @@ resource "shell_script" "register_iot_edge_device" {
     read   = "$script read"
     delete = "$script delete"
   }
-  count = var.number_of_edge_devices
+  for_each = toset(local.edge_device_list)
   environment = {
-    iot_hub_name         = azurerm_iothub.iothub.name
-    iot_edge_device_name = "iot-edge-device-${count.index}"
+    iot_hub_name                 = azurerm_iothub.iothub.name
+    iot_edge_device_name         = each.value
     iot_module_settings_filepath = "./iot-device-module-settings.json"
-    script               = "./iot-device-lifecycle.sh"
+    script                       = "./iot-device-lifecycle.sh"
   }
 }
 
@@ -174,14 +211,14 @@ resource "azurerm_subnet_network_security_group_association" "ssh" {
 }
 
 module "vm" {
-  for_each = {for x in shell_script.register_iot_edge_device: x.environment.iot_edge_device_name => x}
-  source = "./modules/vm"
-  rgname = azurerm_resource_group.rg.name
-  location = azurerm_resource_group.rg.location
-  name = each.key
-  subnet_id = azurerm_subnet.subnet.id
+  for_each         = toset(local.edge_device_list)
+  source           = "./modules/vm"
+  rgname           = azurerm_resource_group.rg.name
+  location         = azurerm_resource_group.rg.location
+  name             = each.value
+  subnet_id        = azurerm_subnet.subnet.id
   enable_public_ip = true
-  custom_data = replace(local.custom_data,"#CONNECTION_STRING_HERE",each.value.output.connectionString)
+  custom_data      = replace(local.custom_data, "#CONNECTION_STRING_HERE", shell_script.register_iot_edge_device[each.value].output.connectionString)
 }
 
 locals {
@@ -196,4 +233,21 @@ locals {
   sudo iotedge config mp --connection-string '#CONNECTION_STRING_HERE'
   sudo iotedge config apply
   CUSTOM_DATA
+
+  edge_device_list = [for i in range(0, var.number_of_edge_devices) : "iot-edge-device-${i}"]
+}
+
+resource "null_resource" "start_stream_analytics_job" {
+  depends_on = [
+    azurerm_stream_analytics_output_table.stream_analytics_job_output,
+    azurerm_stream_analytics_stream_input_iothub.stream_analytics_job_input,
+    azurerm_stream_analytics_job.stream_analytics_job
+  ]
+  triggers = {
+    create_trigger = random_string.random_suffix.id
+  }
+  provisioner "local-exec" {
+    command = "az stream-analytics job start --job-name ${azurerm_stream_analytics_job.stream_analytics_job.name} --resource-group ${azurerm_resource_group.rg.name}"
+    when = create
+  }
 }
